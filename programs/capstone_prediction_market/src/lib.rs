@@ -38,7 +38,8 @@ pub mod capstone_prediction_market {
     pub fn claim_payout(ctx: Context<ClaimPayout>) -> Result<()> {
         instructions::claim_payout(ctx)
     }
-}
 
-// #[derive(Accounts)]
-// pub struct Initialize {}
+    pub fn claim_lp_fees(ctx: Context<ClaimLPFees>) -> Result<()> {
+        instructions::claim_lp_fees(ctx)
+    }
+}
