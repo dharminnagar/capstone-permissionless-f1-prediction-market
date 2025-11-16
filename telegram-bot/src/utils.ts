@@ -5,28 +5,37 @@ export function formatSOL(lamports: number): string {
 }
 
 export function formatMarket(market: any): string {
-  const question = Buffer.from(market.question).toString('utf8').replace(/\0/g, '');
-  const yesOdds = ((market.yesPool / market.totalLiquidity) * 100).toFixed(1);
-  const noOdds = ((market.noPool / market.totalLiquidity) * 100).toFixed(1);
+  const yesOdds = market.totalLiquidity > 0 
+    ? ((market.yesPool / market.totalLiquidity) * 100).toFixed(1) 
+    : '50.0';
+  const noOdds = market.totalLiquidity > 0 
+    ? ((market.noPool / market.totalLiquidity) * 100).toFixed(1) 
+    : '50.0';
+  
+  const closeDate = new Date(market.closeTime * 1000);
+  const now = new Date();
+  const isClosed = closeDate < now;
   
   return (
     `*Market #${market.marketId}*\n` +
-    `${question}\n\n` +
-    `💰 Pool: ${formatSOL(market.totalLiquidity)} SOL\n` +
-    `📊 YES: ${yesOdds}% | NO: ${noOdds}%\n` +
-    `🕐 Closes: ${new Date(market.closeTime * 1000).toLocaleString()}\n` +
-    `Status: ${market.state}`
+    `${market.question}\n\n` +
+    `💰 Total Pool: ${formatSOL(market.totalLiquidity)} SOL\n` +
+    `📊 YES: ${formatSOL(market.yesPool)} (${yesOdds}%) | NO: ${formatSOL(market.noPool)} (${noOdds}%)\n` +
+    `🕐 ${isClosed ? '🔒 Closed' : 'Closes'}: ${closeDate.toLocaleString()}\n` +
+    `📌 Status: ${market.state}${market.outcome !== null ? ` | Outcome: ${market.outcome ? '✅ YES' : '❌ NO'}` : ''}`
   );
 }
 
-export function formatPosition(position: any): string {
-  const side = position.side ? 'YES' : 'NO';
+export function formatPosition(position: any, marketQuestion?: string): string {
+  const side = position.side ? 'YES ✅' : 'NO ❌';
   
   return (
     `*Position*\n` +
-    `Market: ${position.market.toString().slice(0, 8)}...\n` +
+    (marketQuestion ? `Q: ${marketQuestion}\n` : '') +
+    `Market: \`${position.market.toString().slice(0, 16)}...\`\n` +
     `Side: ${side}\n` +
     `Amount: ${formatSOL(position.amount)} SOL\n` +
+    `Entry Odds: ${(position.entryOdds / 10000).toFixed(2)}%\n` +
     `Status: ${position.claimed ? '✅ Claimed' : '⏳ Pending'}`
   );
 }
