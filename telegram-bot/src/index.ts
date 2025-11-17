@@ -1,7 +1,7 @@
 import { Telegraf, Context, Markup } from 'telegraf';
-import { Connection, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { Connection, PublicKey, LAMPORTS_PER_SOL, Keypair } from '@solana/web3.js';
 import dotenv from 'dotenv';
-import { WalletManager } from './wallet';
+import { PrivyWalletManager } from './privy-wallet';
 import { SolanaService } from './solana';
 import { formatSOL, formatMarket, formatPosition } from './utils';
 
@@ -10,22 +10,28 @@ dotenv.config();
 const BOT_TOKEN = process.env.BOT_TOKEN!;
 const RPC_URL = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
 const PROGRAM_ID = process.env.PROGRAM_ID!;
+const PRIVY_APP_ID = process.env.PRIVY_APP_ID!;
+const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET!;
+const PRIVY_AUTH_KEY = process.env.PRIVY_AUTHORIZATION_PRIVATE_KEY!;
 
 class F1PredictionBot {
   private bot: Telegraf;
   private connection: Connection;
-  private walletManager: WalletManager;
+  private walletManager: PrivyWalletManager;
   private solanaService: SolanaService;
 
   constructor() {
     if (!BOT_TOKEN) {
       throw new Error('BOT_TOKEN is not set in .env file');
     }
+    if (!PRIVY_APP_ID || !PRIVY_APP_SECRET || !PRIVY_AUTH_KEY) {
+      throw new Error('Privy credentials are not set in .env file');
+    }
     
     this.bot = new Telegraf(BOT_TOKEN);
     this.connection = new Connection(RPC_URL, 'confirmed');
-    this.walletManager = new WalletManager();
-    this.solanaService = new SolanaService(this.connection, PROGRAM_ID);
+    this.walletManager = new PrivyWalletManager(PRIVY_APP_ID, PRIVY_APP_SECRET, PRIVY_AUTH_KEY);
+    this.solanaService = new SolanaService(this.connection, PROGRAM_ID, this.walletManager);
 
     this.setupCommands();
     this.setupCallbacks();
@@ -65,7 +71,8 @@ class F1PredictionBot {
           `*Wallet:*\n` +
           `/wallet - View your wallet address and balance\n` +
           `/deposit - Get deposit instructions\n` +
-          `/export - Export your private key (DM only)\n\n` +
+          `/withdraw <address> <amount> - Send SOL to external wallet\n` +
+          `/export - View wallet information\n\n` +
           `*Markets:*\n` +
           `/markets - View active prediction markets\n` +
           `/market <id> - View specific market details\n` +
@@ -97,12 +104,18 @@ class F1PredictionBot {
         return;
       }
 
-      const keypair = this.walletManager.getWallet(userId);
-      const balance = await this.connection.getBalance(keypair.publicKey);
+      const wallet = await this.walletManager.getWallet(userId);
+      if (!wallet) {
+        await ctx.reply('❌ Wallet not found. Please use /start to create one.');
+        return;
+      }
+
+      const walletPubkey = new PublicKey(wallet.address);
+      const balance = await this.connection.getBalance(walletPubkey);
 
       await ctx.reply(
         `💰 *Your Wallet*\n\n` +
-        `Address: \`${keypair.publicKey.toString()}\`\n` +
+        `Address: \`${wallet.address}\`\n` +
         `Balance: *${formatSOL(balance)}* SOL\n\n` +
         `Use /deposit to add funds`,
         { parse_mode: 'Markdown' }
@@ -118,12 +131,16 @@ class F1PredictionBot {
         return;
       }
 
-      const keypair = this.walletManager.getWallet(userId);
+      const wallet = await this.walletManager.getWallet(userId);
+      if (!wallet) {
+        await ctx.reply('❌ Wallet not found. Please try /start again.');
+        return;
+      }
       
       await ctx.reply(
         `📥 *Deposit SOL*\n\n` +
         `Send SOL to this address:\n\n` +
-        `\`${keypair.publicKey.toString()}\`\n\n` +
+        `\`${wallet.address}\`\n\n` +
         `⚠️ DEVNET ONLY - Use /wallet to check balance`,
         { parse_mode: 'Markdown' }
       );
@@ -221,10 +238,15 @@ class F1PredictionBot {
         return;
       }
 
-      const keypair = this.walletManager.getWallet(userId);
-      
       try {
-        const positions = await this.solanaService.getUserPositions(keypair.publicKey);
+        const wallet = await this.walletManager.getWallet(userId);
+        if (!wallet) {
+          await ctx.reply('❌ Wallet not found. Please use /start to create one.');
+          return;
+        }
+        
+        const userPublicKey = new PublicKey(wallet.address);
+        const positions = await this.solanaService.getUserPositions(userPublicKey);
         
         if (positions.length === 0) {
           await ctx.reply('📭 No open positions. Use /markets to place your first bet!');
@@ -306,9 +328,8 @@ class F1PredictionBot {
       await ctx.reply('🔄 Placing bet...');
 
       try {
-        const keypair = this.walletManager.getWallet(userId);
         const signature = await this.solanaService.placeBet(
-          keypair,
+          userId,
           marketId,
           side === 'yes',
           amount * LAMPORTS_PER_SOL
@@ -368,8 +389,7 @@ class F1PredictionBot {
       await ctx.reply('🔄 Claiming payout...');
 
       try {
-        const keypair = this.walletManager.getWallet(userId);
-        const signature = await this.solanaService.claimPayout(keypair, marketId);
+        const signature = await this.solanaService.claimPayout(userId, marketId);
 
         await ctx.reply(
           `✅ *Payout Claimed!*\n\n` +
@@ -395,7 +415,12 @@ class F1PredictionBot {
       await ctx.reply('🔄 Checking your rewards...');
 
       try {
-        const keypair = this.walletManager.getWallet(userId);
+        const wallet = await this.walletManager.getWallet(userId);
+        if (!wallet) {
+          await ctx.reply('❌ Wallet not found. Please use /start to create one.');
+          return;
+        }
+        const userPublicKey = new PublicKey(wallet.address);
         const markets = await this.solanaService.getActiveMarkets();
         
         let rewardsFound = false;
@@ -403,11 +428,12 @@ class F1PredictionBot {
 
         for (const market of markets) {
           // Check if user is the creator and has unclaimed LP fees
-          if (market.creator.toString() === keypair.publicKey.toString()) {
-            const [lpPositionPDA] = await this.solanaService['getLPPositionPDA'](market.publicKey, keypair.publicKey);
+          if (market.creator.toString() === userPublicKey.toString()) {
+            const [lpPositionPDA] = await this.solanaService['getLPPositionPDA'](market.publicKey, userPublicKey);
             
             try {
-              const provider = this.solanaService['getProvider'](keypair);
+              const dummyKeypair = Keypair.generate();
+              const provider = this.solanaService['getProvider'](dummyKeypair);
               const program = this.solanaService['getProgram'](provider);
               const lpPosition = await (program.account as any).lpPosition.fetch(lpPositionPDA);
               
@@ -477,8 +503,7 @@ class F1PredictionBot {
       await ctx.reply('🔄 Claiming LP fees...');
 
       try {
-        const keypair = this.walletManager.getWallet(userId);
-        const signature = await this.solanaService.claimLPFees(keypair, marketId);
+        const signature = await this.solanaService.claimLPFees(userId, marketId);
 
         await ctx.reply(
           `✅ *LP Fees Claimed!*\n\n` +
@@ -520,18 +545,113 @@ class F1PredictionBot {
       }
 
       try {
-        const privateKey = this.walletManager.exportPrivateKey(userId);
-        
+        const exportInfo = await this.walletManager.getWalletExportInfo(userId);
+        await ctx.reply(exportInfo, { parse_mode: 'Markdown' });
+      } catch (error) {
+        console.error('Error in /export:', error);
+        await ctx.reply('❌ Error retrieving wallet information. Please try again.');
+      }
+    });
+
+    // Withdraw command - send funds to external wallet
+    this.bot.command('withdraw', async (ctx) => {
+      const userId = ctx.from.id.toString();
+      
+      if (!this.walletManager.hasWallet(userId)) {
+        await ctx.reply('❌ Please use /start first to create your wallet.');
+        return;
+      }
+
+      const args = ctx.message.text.split(' ').slice(1);
+      
+      if (args.length < 2) {
         await ctx.reply(
-          `🔐 *Your Private Key*\n\n` +
-          `\`${privateKey}\`\n\n` +
-          `⚠️ *NEVER SHARE THIS WITH ANYONE!*\n` +
-          `Store it safely. Anyone with this key can access your wallet.\n\n` +
-          `To import in Phantom or other wallets, use this private key.`,
+          `💸 *Withdraw SOL*\n\n` +
+          `Format: /withdraw <address> <amount>\n\n` +
+          `Example:\n` +
+          `/withdraw 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU 0.5\n\n` +
+          `This will send 0.5 SOL to the specified address.\n\n` +
+          `Use /wallet to check your balance.`,
           { parse_mode: 'Markdown' }
         );
+        return;
+      }
+
+      const [toAddress, amountStr] = args;
+      const amount = parseFloat(amountStr);
+
+      if (isNaN(amount) || amount <= 0) {
+        await ctx.reply('❌ Invalid amount. Must be greater than 0.');
+        return;
+      }
+
+      try {
+        // Validate address
+        new PublicKey(toAddress);
       } catch (error) {
-        await ctx.reply('❌ Error exporting private key. Please try again.');
+        await ctx.reply('❌ Invalid Solana address. Please check and try again.');
+        return;
+      }
+
+      await ctx.reply(`🔄 Processing withdrawal of ${amount} SOL...`);
+
+      try {
+        const wallet = await this.walletManager.getWallet(userId);
+        if (!wallet) {
+          await ctx.reply('❌ Wallet not found. Please use /start to create one.');
+          return;
+        }
+
+        const fromPubkey = new PublicKey(wallet.address);
+        const toPubkey = new PublicKey(toAddress);
+
+        // Check balance
+        const balance = await this.connection.getBalance(fromPubkey);
+        const amountLamports = amount * LAMPORTS_PER_SOL;
+        const estimatedFee = 5000; // 0.000005 SOL
+
+        if (balance < amountLamports + estimatedFee) {
+          await ctx.reply(
+            `❌ Insufficient balance.\n\n` +
+            `Balance: ${formatSOL(balance)} SOL\n` +
+            `Required: ${amount} SOL + fees`
+          );
+          return;
+        }
+
+        // Build transaction
+        const { Transaction: SolanaTransaction, SystemProgram } = await import('@solana/web3.js');
+        const transaction = new SolanaTransaction().add(
+          SystemProgram.transfer({
+            fromPubkey,
+            toPubkey,
+            lamports: amountLamports,
+          })
+        );
+
+        // Get recent blockhash
+        const { blockhash } = await this.connection.getLatestBlockhash();
+        transaction.recentBlockhash = blockhash;
+        transaction.feePayer = fromPubkey;
+
+        // Sign with Privy
+        const signedTx = await this.walletManager.signTransaction(userId, transaction);
+
+        // Send transaction
+        const signature = await this.connection.sendRawTransaction(signedTx.serialize());
+        await this.connection.confirmTransaction(signature, 'confirmed');
+
+        await ctx.reply(
+          `✅ *Withdrawal Successful!*\n\n` +
+          `Amount: ${amount} SOL\n` +
+          `To: \`${toAddress}\`\n\n` +
+          `TX: \`${signature}\`\n\n` +
+          `View on Solana Explorer:\nhttps://explorer.solana.com/tx/${signature}?cluster=devnet`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (error: any) {
+        console.error('Error in /withdraw:', error);
+        await ctx.reply(`❌ Withdrawal failed: ${error.message || 'Unknown error'}`);
       }
     });
 
@@ -604,11 +724,10 @@ class F1PredictionBot {
       await ctx.reply('🔄 Creating market...\nThis may take a few seconds.');
 
       try {
-        const keypair = this.walletManager.getWallet(userId);
         const closeTime = Math.floor(Date.now() / 1000) + Math.floor(hours * 3600);
         
         const result = await this.solanaService.createMarket(
-          keypair,
+          userId,
           question,
           liquidity * LAMPORTS_PER_SOL,
           closeTime
@@ -706,8 +825,7 @@ class F1PredictionBot {
       await ctx.reply('🔄 Resolving market...');
 
       try {
-        const keypair = this.walletManager.getWallet(userId);
-        const signature = await this.solanaService.resolveMarket(keypair, marketId, outcome);
+        const signature = await this.solanaService.resolveMarket(userId, marketId, outcome);
 
         await ctx.reply(
           `✅ *Market Resolved!*\n\n` +
@@ -775,15 +893,20 @@ class F1PredictionBot {
   }
 
   private async createWallet(ctx: Context, userId: string) {
-    const keypair = this.walletManager.createWallet(userId);
-    
-    await ctx.reply(
-      `✅ Wallet created!\n\n` +
-      `Address: \`${keypair.publicKey.toString()}\`\n\n` +
-      `⚠️ IMPORTANT: This is a devnet wallet. Use /export to back up your private key.\n` +
-      `Use /deposit to fund your wallet.`,
-      { parse_mode: 'Markdown' }
-    );
+    try {
+      const { walletId, address } = await this.walletManager.createWallet(userId);
+      
+      await ctx.reply(
+        `✅ Wallet created!\n\n` +
+        `Address: \`${address}\`\n\n` +
+        `⚠️ Your wallet is managed by Privy and is self-custodial.\n` +
+        `Use /deposit to fund your wallet.`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (error) {
+      console.error('Error creating wallet:', error);
+      await ctx.reply('❌ Failed to create wallet. Please try again.');
+    }
   }
 
   private async handleBet(ctx: any, marketId: string, side: boolean) {
@@ -819,9 +942,8 @@ class F1PredictionBot {
     await ctx.reply('🔄 Placing bet...');
 
     try {
-      const keypair = this.walletManager.getWallet(userId);
       const signature = await this.solanaService.placeBet(
-        keypair,
+        userId,
         parseInt(marketId),
         side,
         amount * LAMPORTS_PER_SOL
@@ -848,6 +970,7 @@ class F1PredictionBot {
         { command: 'help', description: 'Show all commands' },
         { command: 'wallet', description: 'View wallet address and balance' },
         { command: 'deposit', description: 'Get deposit instructions' },
+        { command: 'withdraw', description: 'Send SOL to external wallet' },
         { command: 'markets', description: 'View active prediction markets' },
         { command: 'market', description: 'View specific market details' },
         { command: 'create', description: 'Create a new prediction market' },
@@ -857,7 +980,7 @@ class F1PredictionBot {
         { command: 'claim', description: 'Claim your winnings' },
         { command: 'rewards', description: 'View claimable LP fees' },
         { command: 'claimfees', description: 'Claim LP fees (creators)' },
-        { command: 'export', description: 'Export private key (DM only)' },
+        { command: 'export', description: 'View wallet information (DM only)' },
         { command: 'about', description: 'About the platform' },
       ]);
       console.log('✅ Bot commands registered with Telegram');

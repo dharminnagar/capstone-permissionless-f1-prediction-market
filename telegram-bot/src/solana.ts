@@ -1,6 +1,7 @@
-import { Connection, PublicKey, Keypair, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { Connection, PublicKey, Keypair, SystemProgram, LAMPORTS_PER_SOL, Transaction, VersionedTransaction } from '@solana/web3.js';
 import { Program, AnchorProvider, Wallet, BN, Idl } from '@coral-xyz/anchor';
 import idlJson from './idl.json';
+import { PrivyWalletManager } from './privy-wallet';
 
 const idl = idlJson as Idl;
 
@@ -33,10 +34,12 @@ export interface Position {
 export class SolanaService {
   private connection: Connection;
   private programId: PublicKey;
+  private walletManager: PrivyWalletManager;
 
-  constructor(connection: Connection, programId: string) {
+  constructor(connection: Connection, programId: string, walletManager: PrivyWalletManager) {
     this.connection = connection;
     this.programId = new PublicKey(programId);
+    this.walletManager = walletManager;
   }
 
   private getProvider(keypair: Keypair): AnchorProvider {
@@ -195,19 +198,28 @@ export class SolanaService {
   }
 
   async placeBet(
-    userKeypair: Keypair,
+    userId: string,
     marketId: number,
     side: boolean,
     amount: number
   ): Promise<string> {
     try {
-      const provider = this.getProvider(userKeypair);
+      // Get user wallet from Privy
+      const wallet = await this.walletManager.getWallet(userId);
+      if (!wallet) {
+        throw new Error('Wallet not found for user');
+      }
+      const userPublicKey = new PublicKey(wallet.address);
+
+      // Create a dummy keypair for provider (needed for program initialization)
+      const dummyKeypair = Keypair.generate();
+      const provider = this.getProvider(dummyKeypair);
       const program = this.getProgram(provider);
 
       const [globalStatePDA] = await this.getGlobalStatePDA();
       const [marketPDA] = await this.getMarketPDA(marketId);
       const [marketVaultPDA] = await this.getMarketVaultPDA(marketPDA);
-      const [positionPDA] = await this.getPositionPDA(marketPDA, userKeypair.publicKey);
+      const [positionPDA] = await this.getPositionPDA(marketPDA, userPublicKey);
 
       // Fetch market to get creator
       const marketAccount = await (program.account as any).market.fetch(marketPDA);
@@ -216,6 +228,7 @@ export class SolanaService {
       // Fetch global state to get protocol treasury
       const globalState = await (program.account as any).globalState.fetch(globalStatePDA);
 
+      // Build the transaction
       const tx = await program.methods
         .placeBet(side, new BN(amount))
         .accounts({
@@ -225,12 +238,24 @@ export class SolanaService {
           position: positionPDA,
           lpPosition: lpPositionPDA,
           protocolTreasury: globalState.protocolTreasury,
-          user: userKeypair.publicKey,
+          user: userPublicKey,
           systemProgram: SystemProgram.programId,
         })
-        .rpc();
+        .transaction();
 
-      return tx;
+      // Get recent blockhash
+      const { blockhash } = await this.connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = userPublicKey;
+
+      // Sign transaction with Privy
+      const signedTx = await this.walletManager.signTransaction(userId, tx);
+
+      // Send the signed transaction
+      const signature = await this.connection.sendRawTransaction(signedTx.serialize());
+      await this.connection.confirmTransaction(signature, 'confirmed');
+
+      return signature;
     } catch (error) {
       console.error('Error placing bet:', error);
       throw error;
@@ -238,29 +263,51 @@ export class SolanaService {
   }
 
   async claimPayout(
-    userKeypair: Keypair,
+    userId: string,
     marketId: number
   ): Promise<string> {
     try {
-      const provider = this.getProvider(userKeypair);
+      // Get user wallet from Privy
+      const wallet = await this.walletManager.getWallet(userId);
+      if (!wallet) {
+        throw new Error('Wallet not found for user');
+      }
+      const userPublicKey = new PublicKey(wallet.address);
+
+      // Create a dummy keypair for provider
+      const dummyKeypair = Keypair.generate();
+      const provider = this.getProvider(dummyKeypair);
       const program = this.getProgram(provider);
 
       const [marketPDA] = await this.getMarketPDA(marketId);
       const [marketVaultPDA] = await this.getMarketVaultPDA(marketPDA);
-      const [positionPDA] = await this.getPositionPDA(marketPDA, userKeypair.publicKey);
+      const [positionPDA] = await this.getPositionPDA(marketPDA, userPublicKey);
 
+      // Build the transaction
       const tx = await program.methods
         .claimPayout()
         .accounts({
           market: marketPDA,
           position: positionPDA,
           marketVault: marketVaultPDA,
-          user: userKeypair.publicKey,
+          user: userPublicKey,
           systemProgram: SystemProgram.programId,
         })
-        .rpc();
+        .transaction();
 
-      return tx;
+      // Get recent blockhash
+      const { blockhash } = await this.connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = userPublicKey;
+
+      // Sign transaction with Privy
+      const signedTx = await this.walletManager.signTransaction(userId, tx);
+
+      // Send the signed transaction
+      const signature = await this.connection.sendRawTransaction(signedTx.serialize());
+      await this.connection.confirmTransaction(signature, 'confirmed');
+
+      return signature;
     } catch (error) {
       console.error('Error claiming payout:', error);
       throw error;
@@ -268,13 +315,22 @@ export class SolanaService {
   }
 
   async createMarket(
-    creatorKeypair: Keypair,
+    userId: string,
     question: string,
     initialLiquidity: number,
     closeTime: number
   ): Promise<{ signature: string; marketId: number }> {
     try {
-      const provider = this.getProvider(creatorKeypair);
+      // Get user wallet from Privy
+      const wallet = await this.walletManager.getWallet(userId);
+      if (!wallet) {
+        throw new Error('Wallet not found for user');
+      }
+      const userPublicKey = new PublicKey(wallet.address);
+
+      // Create a dummy keypair for provider
+      const dummyKeypair = Keypair.generate();
+      const provider = this.getProvider(dummyKeypair);
       const program = this.getProgram(provider);
 
       const [globalStatePDA] = await this.getGlobalStatePDA();
@@ -284,12 +340,13 @@ export class SolanaService {
 
       const [marketPDA] = await this.getMarketPDA(nextMarketId);
       const [marketVaultPDA] = await this.getMarketVaultPDA(marketPDA);
-      const [lpPositionPDA] = await this.getLPPositionPDA(marketPDA, creatorKeypair.publicKey);
+      const [lpPositionPDA] = await this.getLPPositionPDA(marketPDA, userPublicKey);
 
       // Convert question to bytes
       const questionBytes = Buffer.alloc(200);
       Buffer.from(question.slice(0, 200)).copy(questionBytes);
 
+      // Build the transaction
       const tx = await program.methods
         .createMarket(
           Array.from(questionBytes),
@@ -297,16 +354,28 @@ export class SolanaService {
           new BN(closeTime)
         )
         .accounts({
-          creator: creatorKeypair.publicKey,
+          creator: userPublicKey,
           globalState: globalStatePDA,
           market: marketPDA,
           lpPosition: lpPositionPDA,
           marketVault: marketVaultPDA,
           systemProgram: SystemProgram.programId,
         })
-        .rpc();
+        .transaction();
 
-      return { signature: tx, marketId: nextMarketId };
+      // Get recent blockhash
+      const { blockhash } = await this.connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = userPublicKey;
+
+      // Sign transaction with Privy
+      const signedTx = await this.walletManager.signTransaction(userId, tx);
+
+      // Send the signed transaction
+      const signature = await this.connection.sendRawTransaction(signedTx.serialize());
+      await this.connection.confirmTransaction(signature, 'confirmed');
+
+      return { signature, marketId: nextMarketId };
     } catch (error) {
       console.error('Error creating market:', error);
       throw error;
@@ -314,25 +383,47 @@ export class SolanaService {
   }
 
   async resolveMarket(
-    resolverKeypair: Keypair,
+    userId: string,
     marketId: number,
     outcome: boolean
   ): Promise<string> {
     try {
-      const provider = this.getProvider(resolverKeypair);
+      // Get user wallet from Privy
+      const wallet = await this.walletManager.getWallet(userId);
+      if (!wallet) {
+        throw new Error('Wallet not found for user');
+      }
+      const userPublicKey = new PublicKey(wallet.address);
+
+      // Create a dummy keypair for provider
+      const dummyKeypair = Keypair.generate();
+      const provider = this.getProvider(dummyKeypair);
       const program = this.getProgram(provider);
 
       const [marketPDA] = await this.getMarketPDA(marketId);
 
+      // Build the transaction
       const tx = await program.methods
         .resolveMarket(outcome)
         .accounts({
           market: marketPDA,
-          resolver: resolverKeypair.publicKey,
+          resolver: userPublicKey,
         })
-        .rpc();
+        .transaction();
 
-      return tx;
+      // Get recent blockhash
+      const { blockhash } = await this.connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = userPublicKey;
+
+      // Sign transaction with Privy
+      const signedTx = await this.walletManager.signTransaction(userId, tx);
+
+      // Send the signed transaction
+      const signature = await this.connection.sendRawTransaction(signedTx.serialize());
+      await this.connection.confirmTransaction(signature, 'confirmed');
+
+      return signature;
     } catch (error) {
       console.error('Error resolving market:', error);
       throw error;
@@ -340,29 +431,51 @@ export class SolanaService {
   }
 
   async claimLPFees(
-    creatorKeypair: Keypair,
+    userId: string,
     marketId: number
   ): Promise<string> {
     try {
-      const provider = this.getProvider(creatorKeypair);
+      // Get user wallet from Privy
+      const wallet = await this.walletManager.getWallet(userId);
+      if (!wallet) {
+        throw new Error('Wallet not found for user');
+      }
+      const userPublicKey = new PublicKey(wallet.address);
+
+      // Create a dummy keypair for provider
+      const dummyKeypair = Keypair.generate();
+      const provider = this.getProvider(dummyKeypair);
       const program = this.getProgram(provider);
 
       const [marketPDA] = await this.getMarketPDA(marketId);
       const [marketVaultPDA] = await this.getMarketVaultPDA(marketPDA);
-      const [lpPositionPDA] = await this.getLPPositionPDA(marketPDA, creatorKeypair.publicKey);
+      const [lpPositionPDA] = await this.getLPPositionPDA(marketPDA, userPublicKey);
 
+      // Build the transaction
       const tx = await program.methods
         .claimLpFees()
         .accounts({
           market: marketPDA,
           lpPosition: lpPositionPDA,
           marketVault: marketVaultPDA,
-          creator: creatorKeypair.publicKey,
+          creator: userPublicKey,
           systemProgram: SystemProgram.programId,
         })
-        .rpc();
+        .transaction();
 
-      return tx;
+      // Get recent blockhash
+      const { blockhash } = await this.connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = userPublicKey;
+
+      // Sign transaction with Privy
+      const signedTx = await this.walletManager.signTransaction(userId, tx);
+
+      // Send the signed transaction
+      const signature = await this.connection.sendRawTransaction(signedTx.serialize());
+      await this.connection.confirmTransaction(signature, 'confirmed');
+
+      return signature;
     } catch (error) {
       console.error('Error claiming LP fees:', error);
       throw error;

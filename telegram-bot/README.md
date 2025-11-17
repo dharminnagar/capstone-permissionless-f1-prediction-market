@@ -4,26 +4,26 @@ A Telegram bot frontend for the F1 Prediction Market built on Solana. This bot p
 
 ## Features
 
-- **🤖 Embedded Wallets**: Non-custodial wallets created automatically for each user
+- **🤖 Privy Embedded Wallets**: Self-custodial wallets powered by Privy.io, created automatically for each user
 - **💰 Easy Betting**: Simple inline buttons to place bets with SOL
 - **📊 Market Discovery**: Browse active prediction markets
 - **🎯 Position Tracking**: View all your open positions
 - **💸 Claim Rewards**: Easily claim winnings from resolved markets
 - **🏗️ Market Creation**: Create your own prediction markets
-- **🔐 Export Keys**: Export private keys to external wallets (Phantom, etc.)
+- **🔐 Secure Signing**: All transactions signed via Privy's secure API
 
 ## Architecture
 
 ```
 telegram-bot/
 ├── src/
-│   ├── index.ts      # Main bot logic & Telegram commands
-│   ├── wallet.ts     # Embedded wallet management
-│   ├── solana.ts     # Solana/Anchor program integration
-│   ├── utils.ts      # Formatting utilities
-│   └── idl.json      # Anchor program IDL
-├── wallets/          # User wallet storage (auto-generated)
-└── .env              # Configuration
+│   ├── index.ts           # Main bot logic & Telegram commands
+│   ├── privy-wallet.ts    # Privy wallet management & API integration
+│   ├── solana.ts          # Solana/Anchor program integration
+│   ├── utils.ts           # Formatting utilities
+│   └── idl.json           # Anchor program IDL
+├── wallets/  # User ID to Privy wallet mappings (auto-generated)
+└── .env                   # Configuration (includes Privy credentials)
 ```
 
 ## Setup
@@ -54,6 +54,9 @@ cp .env.example .env
 Edit `.env` and add:
 - `BOT_TOKEN`: Your bot token from BotFather
 - `ADMIN_TELEGRAM_ID`: Your Telegram user ID (get from [@userinfobot](https://t.me/userinfobot))
+- `PRIVY_APP_ID`: Your Privy App ID from [dashboard.privy.io](https://dashboard.privy.io)
+- `PRIVY_APP_SECRET`: Your Privy App Secret
+- `PRIVY_AUTHORIZATION_PRIVATE_KEY`: Your Privy authorization private key (wallet-auth format)
 
 ### 4. Deploy the Solana Program (if not already deployed)
 
@@ -65,7 +68,18 @@ anchor deploy --provider.cluster devnet
 
 Update `PROGRAM_ID` in `.env` if it changed.
 
-### 5. Initialize the Program
+### 5. Get Privy Credentials
+
+If you haven't already:
+
+1. Go to [dashboard.privy.io](https://dashboard.privy.io) and sign in
+2. Select your app or create a new one
+3. Go to Settings → Wallet Configurations
+4. Ensure "Solana" is enabled
+5. Copy your App ID, App Secret, and Authorization Private Key
+6. Verify these are correctly set in your `.env` file
+
+### 6. Initialize the Program
 
 The program needs to be initialized once:
 
@@ -74,7 +88,7 @@ The program needs to be initialized once:
 anchor run init-devnet
 ```
 
-### 6. Run the Bot
+### 7. Run the Bot
 
 Development mode (with auto-reload):
 ```bash
@@ -90,10 +104,11 @@ npm start
 ## Bot Commands
 
 ### Wallet Commands
-- `/start` - Create your wallet and get started
+- `/start` - Create your Privy wallet and get started
 - `/wallet` - View wallet address and balance
 - `/deposit` - Get deposit instructions
-- `/export` - Export your private key (DM only)
+- `/withdraw <address> <amount>` - Send SOL to an external wallet
+- `/export` - View wallet information and recovery options (DM only)
 
 ### Market Commands
 - `/markets` - View all active prediction markets
@@ -143,15 +158,17 @@ This creates a market with:
 - Callback handlers (inline button clicks)
 - User interaction flow
 
-**wallet.ts** - Wallet management
-- Generate Solana keypairs
-- File-based persistence (`wallets/*.json`)
-- Export/import functionality
+**privy-wallet.ts** - Privy wallet management
+- Create wallets via Privy API
+- Sign transactions via Privy API
+- User-to-wallet mapping persistence
+- Secure key management through Privy
 
 **solana.ts** - Blockchain integration
 - Anchor program wrapper
 - PDA derivation
-- Transaction building
+- Transaction building with Privy signing
+- All methods accept `userId` instead of keypairs
 
 **utils.ts** - Formatting helpers
 - Convert lamports to SOL
@@ -177,17 +194,19 @@ All blockchain operations are wrapped in try-catch blocks. Errors are logged to 
 
 ## Security Considerations
 
-### Current Implementation (POC)
-- ✅ Non-custodial (users own private keys)
-- ✅ File-based storage for simplicity
-- ⚠️ Keys stored unencrypted
+### Current Implementation (Privy Integration)
+- ✅ Self-custodial wallets (users control via Privy)
+- ✅ Private keys managed securely by Privy infrastructure
+- ✅ API-based transaction signing (keys never exposed to bot server)
+- ✅ Enterprise-grade key management
+- ✅ Users can claim wallets in web app for direct access
 
 ### Production Recommendations
-- 🔐 Encrypt wallet files with user password
-- 🔐 Use secure key management service (AWS KMS, HashiCorp Vault)
-- 🔐 Implement 2FA for sensitive operations
-- 🔐 Add rate limiting
+- 🔐 Implement rate limiting on commands
 - 🔐 Monitor for suspicious activity
+- 🔐 Add transaction amount limits
+- 🔐 Implement withdrawal confirmations for large amounts
+- 🔐 Regular security audits of Privy integration
 
 ## Troubleshooting
 
