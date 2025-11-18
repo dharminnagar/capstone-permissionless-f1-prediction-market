@@ -38,6 +38,12 @@ export class PrivyWalletManager {
 
   private saveUserWalletMappings() {
     try {
+      // Ensure the wallets directory exists
+      const dir = path.dirname(USER_WALLET_MAPPINGS_PATH);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
       fs.writeFileSync(
         USER_WALLET_MAPPINGS_PATH,
         JSON.stringify(this.userWalletMappings, null, 2)
